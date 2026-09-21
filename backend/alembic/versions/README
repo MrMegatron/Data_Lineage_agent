@@ -1,0 +1,7 @@
+Alembic migration environment for Data Lineage Agent.
+
+Run Alembic commands from the backend directory.
+
+Generated migration files are stored in:
+
+    alembic/versions/

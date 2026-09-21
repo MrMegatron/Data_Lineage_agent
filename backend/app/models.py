@@ -20,18 +20,19 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
-# =========================================================
-# 1. 项目
-# =========================================================
+# ============================================================
+# 1. 血缘项目
+# ============================================================
 
 class LineageProject(Base):
     """
-    一次完整的数据模型代码集合。
+    一次完整的数据血缘分析项目。
 
-    例如：
-        hive_dw_project
-        finance_model
-        risk_model
+    一个项目可以包含：
+    - 多个源代码脚本；
+    - 多张数据表；
+    - 多条脚本依赖；
+    - 多条字段血缘。
     """
 
     __tablename__ = "lineage_project"
@@ -68,38 +69,44 @@ class LineageProject(Base):
     scripts: Mapped[list["SourceScript"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     tables: Mapped[list["DataTable"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     dependencies: Mapped[list["ScriptDependency"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     column_lineages: Mapped[list["ColumnLineage"]] = relationship(
         back_populates="project",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
-# =========================================================
+# ============================================================
 # 2. 源代码脚本
-# =========================================================
+# ============================================================
 
 class SourceScript(Base):
     """
-    上传的源码脚本。
+    用户导入的数据开发脚本。
 
     保存：
-    - 文件路径
-    - SQL 方言
-    - 文件 hash
-    - 原始代码
-    - 解析状态
+    - 文件名；
+    - 相对路径；
+    - SQL 方言；
+    - 文件 Hash；
+    - 原始代码；
+    - 解析状态；
+    - 解析错误。
     """
 
     __tablename__ = "source_script"
@@ -111,11 +118,18 @@ class SourceScript(Base):
             name="uq_source_script_project_path",
         ),
         CheckConstraint(
-            "dialect IN ('hive', 'spark', 'postgresql', 'unknown')",
+            (
+                "dialect IN "
+                "('hive', 'spark', 'mysql', "
+                "'postgresql', 'unknown')"
+            ),
             name="source_script_dialect",
         ),
         CheckConstraint(
-            "parse_status IN ('pending', 'success', 'failed')",
+            (
+                "parse_status IN "
+                "('pending', 'success', 'failed')"
+            ),
             name="source_script_parse_status",
         ),
     )
@@ -192,34 +206,49 @@ class SourceScript(Base):
     table_accesses: Mapped[list["ScriptTableAccess"]] = relationship(
         back_populates="script",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
-    upstream_dependencies: Mapped[list["ScriptDependency"]] = relationship(
+    upstream_dependencies: Mapped[
+        list["ScriptDependency"]
+    ] = relationship(
         foreign_keys="ScriptDependency.downstream_script_id",
         back_populates="downstream_script",
+        passive_deletes=True,
     )
 
-    downstream_dependencies: Mapped[list["ScriptDependency"]] = relationship(
+    downstream_dependencies: Mapped[
+        list["ScriptDependency"]
+    ] = relationship(
         foreign_keys="ScriptDependency.upstream_script_id",
         back_populates="upstream_script",
+        passive_deletes=True,
     )
 
     column_lineages: Mapped[list["ColumnLineage"]] = relationship(
         back_populates="script",
+        passive_deletes=True,
     )
 
     evidences: Mapped[list["LineageEvidence"]] = relationship(
         back_populates="script",
+        passive_deletes=True,
     )
 
 
-# =========================================================
+# ============================================================
 # 3. 数据表
-# =========================================================
+# ============================================================
 
 class DataTable(Base):
     """
-    SQL 代码中识别出来的表。
+    从 SQL 脚本中识别出来的数据表。
+
+    可以表示：
+    - 物理表；
+    - 视图；
+    - 临时表；
+    - 暂时不能判断类型的表。
     """
 
     __tablename__ = "data_table"
@@ -231,7 +260,10 @@ class DataTable(Base):
             name="uq_data_table_project_full_name",
         ),
         CheckConstraint(
-            "table_kind IN ('physical', 'view', 'temp', 'unknown')",
+            (
+                "table_kind IN "
+                "('physical', 'view', 'temp', 'unknown')"
+            ),
             name="data_table_kind",
         ),
     )
@@ -290,24 +322,33 @@ class DataTable(Base):
     columns: Mapped[list["DataColumn"]] = relationship(
         back_populates="table",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
-    script_accesses: Mapped[list["ScriptTableAccess"]] = relationship(
+    script_accesses: Mapped[
+        list["ScriptTableAccess"]
+    ] = relationship(
         back_populates="table",
+        passive_deletes=True,
     )
 
-    dependencies: Mapped[list["ScriptDependency"]] = relationship(
+    dependencies: Mapped[
+        list["ScriptDependency"]
+    ] = relationship(
         back_populates="via_table",
+        passive_deletes=True,
     )
 
 
-# =========================================================
+# ============================================================
 # 4. 数据字段
-# =========================================================
+# ============================================================
 
 class DataColumn(Base):
     """
-    表中的字段。
+    数据表中的字段。
+
+    字段必须属于某一张 DataTable。
     """
 
     __tablename__ = "data_column"
@@ -360,26 +401,34 @@ class DataColumn(Base):
         back_populates="columns",
     )
 
-    as_target_lineages: Mapped[list["ColumnLineage"]] = relationship(
+    as_target_lineages: Mapped[
+        list["ColumnLineage"]
+    ] = relationship(
         foreign_keys="ColumnLineage.target_column_id",
         back_populates="target_column",
+        passive_deletes=True,
     )
 
-    as_source_lineages: Mapped[list["ColumnLineage"]] = relationship(
+    as_source_lineages: Mapped[
+        list["ColumnLineage"]
+    ] = relationship(
         foreign_keys="ColumnLineage.source_column_id",
         back_populates="source_column",
+        passive_deletes=True,
     )
 
 
-# =========================================================
-# 5. 脚本 READ / WRITE 表
-# =========================================================
+# ============================================================
+# 5. 脚本读写表关系
+# ============================================================
 
 class ScriptTableAccess(Base):
     """
-    描述一个脚本读取或写入了哪张表。
+    描述一个脚本读取或写入了哪一张数据表。
 
-    这是自动建立脚本依赖的基础。
+    示例：
+        ods_to_dwd.sql READ  ods.orders
+        ods_to_dwd.sql WRITE dwd.orders
     """
 
     __tablename__ = "script_table_access"
@@ -395,6 +444,10 @@ class ScriptTableAccess(Base):
         CheckConstraint(
             "access_type IN ('read', 'write')",
             name="script_table_access_type",
+        ),
+        CheckConstraint(
+            "statement_no >= 1",
+            name="script_table_access_statement_no",
         ),
         Index(
             "ix_script_table_access_table_type",
@@ -462,17 +515,17 @@ class ScriptTableAccess(Base):
     )
 
 
-# =========================================================
+# ============================================================
 # 6. 脚本依赖
-# =========================================================
+# ============================================================
 
 class ScriptDependency(Base):
     """
-    脚本级 DAG。
+    脚本级依赖关系。
 
     upstream_script
            ↓
-      via_table
+       via_table
            ↓
     downstream_script
     """
@@ -488,7 +541,10 @@ class ScriptDependency(Base):
             name="uq_script_dependency_path",
         ),
         CheckConstraint(
-            "dependency_status IN ('confirmed', 'ambiguous')",
+            (
+                "dependency_status IN "
+                "('confirmed', 'ambiguous')"
+            ),
             name="script_dependency_status",
         ),
         CheckConstraint(
@@ -577,17 +633,17 @@ class ScriptDependency(Base):
     )
 
 
-# =========================================================
+# ============================================================
 # 7. 字段血缘
-# =========================================================
+# ============================================================
 
 class ColumnLineage(Base):
     """
-    字段级血缘。
+    字段级血缘关系。
 
     source_column
           ↓
-    transformation
+    expression_text
           ↓
     target_column
     """
@@ -596,14 +652,23 @@ class ColumnLineage(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "relation_type IN "
-            "('direct', 'transform', 'aggregate', 'constant', 'unknown')",
+            (
+                "relation_type IN "
+                "('direct', 'transform', 'aggregate', "
+                "'constant', 'unknown')"
+            ),
             name="column_lineage_relation_type",
         ),
         CheckConstraint(
-            "resolution_status IN "
-            "('confirmed', 'ambiguous', 'unresolved')",
+            (
+                "resolution_status IN "
+                "('confirmed', 'ambiguous', 'unresolved')"
+            ),
             name="column_lineage_resolution_status",
+        ),
+        CheckConstraint(
+            "statement_no >= 1",
+            name="column_lineage_statement_no",
         ),
         Index(
             "ix_column_lineage_target_status",
@@ -705,23 +770,37 @@ class ColumnLineage(Base):
     evidences: Mapped[list["LineageEvidence"]] = relationship(
         back_populates="column_lineage",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
 
-# =========================================================
-# 8. 血缘证据
-# =========================================================
+# ============================================================
+# 8. 字段血缘证据
+# ============================================================
 
 class LineageEvidence(Base):
     """
     字段血缘对应的源码证据。
 
-    这是整个系统防止 LLM / 程序臆造的重要表。
+    保存：
+    - 对应脚本；
+    - SQL语句编号；
+    - 代码所在行；
+    - 原始代码片段；
+    - 转换表达式。
     """
 
     __tablename__ = "lineage_evidence"
 
     __table_args__ = (
+        CheckConstraint(
+            "statement_no >= 1",
+            name="lineage_evidence_statement_no",
+        ),
+        CheckConstraint(
+            "evidence_order >= 1",
+            name="lineage_evidence_order",
+        ),
         Index(
             "ix_lineage_evidence_lineage_order",
             "column_lineage_id",

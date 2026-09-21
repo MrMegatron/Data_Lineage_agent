@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     db_user: str
     db_password: str
     db_charset: str
+    # -------------------------
+    # SQL 源文件目录
+    # -------------------------
+
+    # API 只允许扫描这个根目录下的文件。
+    sql_source_root: Path = (
+        BASE_DIR.parent / "sql_sources"
+    )
 
     # -------------------------
     # Pydantic Settings配置
