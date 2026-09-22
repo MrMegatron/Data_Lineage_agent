@@ -26,6 +26,12 @@ from app.routers.catalog import (
     router as catalog_router,
 )
 
+from app.routers.column_lineage_router import (
+    router as column_lineage_router,
+)
+from app.routers.column_search_router import (
+    router as column_search_router,
+)
 # ============================================================
 # 1. 创建日志记录器
 # ============================================================
@@ -87,6 +93,12 @@ app.include_router(
 )
 app.include_router(
     catalog_router
+)
+app.include_router(
+    column_lineage_router
+)
+app.include_router(
+    column_search_router
 )
 # ============================================================
 # 4. 根接口

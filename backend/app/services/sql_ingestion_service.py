@@ -1,5 +1,7 @@
 from __future__ import annotations
-
+from app.services.script_column_lineage_service import (
+    process_script_column_lineage,
+)
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -422,6 +424,14 @@ def ingest_scanned_sql_file(
         )
     )
 
+    # --------------------------------------------------------
+    # 自动生成字段级血缘
+    # --------------------------------------------------------
+    if parse_result.parse_status == "success":
+        process_script_column_lineage(
+            db=db,
+            script_id=source_script.id,
+        )
     # --------------------------------------------------------
     # 9. 返回本次处理摘要
     # --------------------------------------------------------

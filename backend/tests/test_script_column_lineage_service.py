@@ -169,7 +169,11 @@ def test_process_direct_column_lineage(
 # 3. 不支持的表达式只跳过，不抛出异常
 # ============================================================
 
-def test_skip_unsupported_transform_expression(
+# ============================================================
+# 3. 支持转换表达式
+# ============================================================
+
+def test_process_transform_expression(
     db_session,
 ):
     sql_text = """
@@ -177,7 +181,7 @@ def test_skip_unsupported_transform_expression(
         amount
     )
     SELECT
-        price * quantity
+        price * quantity AS amount
     FROM ods.orders;
     """
 
@@ -197,35 +201,91 @@ def test_skip_unsupported_transform_expression(
     )
 
     assert result.total_statement_count == 1
-    assert result.success_statement_count == 0
-    assert result.skipped_statement_count == 1
+
+    assert result.success_statement_count == 1
+    assert result.skipped_statement_count == 0
     assert result.failed_statement_count == 0
 
     statement_result = result.statements[0]
 
-    assert statement_result.status == "skipped"
-
     assert (
-        "只支持直接字段映射"
-        in statement_result.reason
+        statement_result.status
+        == "success"
     )
 
-    lineage_count = int(
-        db_session.scalar(
-            select(
-                func.count(
-                    ColumnLineage.id
-                )
-            )
+    # 创建：
+    #
+    # ods.orders.price
+    # ods.orders.quantity
+    # dwd.orders.amount
+    assert (
+        result.created_column_count
+        == 3
+    )
+
+    # 第二条映射保存时，
+    # dwd.orders.amount 已经存在，
+    # 所以会复用一次。
+    assert (
+        result.reused_column_count
+        == 1
+    )
+
+    # price -> amount
+    # quantity -> amount
+    assert (
+        result.created_lineage_count
+        == 2
+    )
+
+    assert (
+        result.created_evidence_count
+        == 2
+    )
+
+    lineages = list(
+        db_session.scalars(
+            select(ColumnLineage)
             .where(
                 ColumnLineage.script_id
                 == script.id
             )
-        )
-        or 0
+        ).all()
     )
 
-    assert lineage_count == 0
+    assert len(lineages) == 2
+
+    assert all(
+        lineage.relation_type
+        == "transform"
+        for lineage in lineages
+    )
+
+    assert all(
+        lineage.resolution_status
+        == "confirmed"
+        for lineage in lineages
+    )
+
+    source_column_names = {
+        lineage
+        .source_column
+        .column_name
+        for lineage in lineages
+    }
+
+    assert source_column_names == {
+        "price",
+        "quantity",
+    }
+
+    assert all(
+        lineage
+        .target_column
+        .column_name
+        == "amount"
+        for lineage in lineages
+    )
 
 
 # ============================================================

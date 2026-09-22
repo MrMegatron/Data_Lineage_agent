@@ -26,13 +26,31 @@ from app.services.column_lineage_extractor import (
 class ColumnLineagePersistenceResult:
     """
     一次字段血缘持久化的统计结果。
+
+    source_table_id:
+        为了兼容以前的单来源表代码而保留。
+
+        单来源表：
+            返回该来源表ID。
+
+        多来源表：
+            返回None。
+
+    source_table_ids:
+        当前SQL所有来源表ID。
     """
 
     project_id: int
     script_id: int
     statement_no: int
 
-    source_table_id: int
+    source_table_id: int | None
+
+    source_table_ids: tuple[
+        int,
+        ...
+    ]
+
     target_table_id: int
 
     created_column_count: int
@@ -57,7 +75,7 @@ def _get_project_or_raise(
     """
     查询血缘项目。
 
-    项目不存在时，不允许继续写字段血缘。
+    项目不存在时不允许继续保存字段血缘。
     """
 
     project = db.get(
@@ -84,9 +102,6 @@ def _get_script_or_raise(
 ) -> SourceScript:
     """
     查询脚本，并验证脚本属于指定项目。
-
-    不能只根据 script_id 查询以后直接使用，
-    因为必须防止把一个项目的字段血缘写入另一个项目。
     """
 
     script = db.get(
@@ -120,9 +135,9 @@ def _get_table_or_raise(
     table_role: str,
 ) -> DataTable:
     """
-    根据项目和完整表名查询数据表。
+    根据项目ID和完整表名查询数据表。
 
-    table_role 用于生成更明确的错误信息，例如：
+    table_role用于生成明确错误，例如：
 
         来源表不存在
         目标表不存在
@@ -167,17 +182,20 @@ def _get_or_create_column(
         table_id
         column_name
 
-    查找字段。
+    创建或者复用字段。
 
     返回：
 
-        (column, created)
+        (
+            DataColumn,
+            created,
+        )
 
     created=True:
-        本次创建了新字段。
+        本次创建了字段。
 
     created=False:
-        数据库中已经存在该字段，本次直接复用。
+        字段已经存在，本次直接复用。
     """
 
     column = db.scalar(
@@ -191,8 +209,8 @@ def _get_or_create_column(
     )
 
     if column is not None:
-        # 如果原来的字段没有位置，
-        # 但这次解析取得了字段位置，就补充位置。
+        # 原来没有字段位置，
+        # 这次能够取得目标字段位置时补充。
         if (
             column.ordinal_position is None
             and ordinal_position is not None
@@ -217,7 +235,7 @@ def _get_or_create_column(
 
 
 # ============================================================
-# 6. 删除当前语句以前的字段血缘
+# 6. 删除当前语句原来的字段血缘
 # ============================================================
 
 def _delete_existing_lineages(
@@ -229,19 +247,18 @@ def _delete_existing_lineages(
     """
     删除当前脚本、当前语句以前生成的字段血缘。
 
-    这样重复解析同一个脚本时，不会出现：
+    重新导入SQL时采用：
 
-        第一次生成 3 条
-        第二次又增加 3 条
-        第三次又增加 3 条
+        删除旧血缘
+        → 保存新血缘
 
-    正确行为应该是：
+    避免重复产生：
 
-        删除旧结果
-        重新保存新结果
+        第一次2条
+        第二次4条
+        第三次6条
 
-    LineageEvidence 和 ColumnLineage 配置了级联关系，
-    删除 ColumnLineage 时，其证据也会一起删除。
+    LineageEvidence会通过ORM级联关系删除。
     """
 
     existing_lineages = list(
@@ -268,7 +285,49 @@ def _delete_existing_lineages(
 
 
 # ============================================================
-# 7. 正式持久化函数
+# 7. 提取Mapping中实际使用的来源表名
+# ============================================================
+
+def _get_mapping_source_table_names(
+    extraction_result: (
+        DirectColumnLineageResult
+    ),
+) -> tuple[str, ...]:
+    """
+    从Mapping中取得实际使用的来源表。
+
+    不直接只依赖：
+
+        extraction_result.source_table_full_names
+
+    是因为SQL的JOIN表可能只出现在ON条件中，
+    但没有字段进入SELECT投影。
+
+    字段血缘持久化只需要处理真正参与目标字段生成的来源表。
+    """
+
+    source_table_names: list[str] = []
+
+    for mapping in (
+        extraction_result.mappings
+    ):
+        source_table_name = (
+            mapping.source_table_full_name
+        )
+
+        if (
+            source_table_name
+            not in source_table_names
+        ):
+            source_table_names.append(
+                source_table_name
+            )
+
+    return tuple(source_table_names)
+
+
+# ============================================================
+# 8. 正式持久化字段血缘
 # ============================================================
 
 def persist_direct_column_lineage(
@@ -276,34 +335,26 @@ def persist_direct_column_lineage(
     project_id: int,
     script_id: int,
     statement_no: int,
-    extraction_result: DirectColumnLineageResult,
+    extraction_result: (
+        DirectColumnLineageResult
+    ),
 ) -> ColumnLineagePersistenceResult:
     """
-    把直接字段血缘提取结果写入数据库。
+    把字段血缘提取结果写入数据库。
+
+    支持：
+
+        单来源表
+        多来源JOIN
+        direct
+        transform
+        aggregate
 
     注意：
 
-    1. 本函数会执行 flush；
-    2. 本函数不会执行 commit；
-    3. 事务是否提交由上层调用者决定。
-
-    数据写入顺序：
-
-        检查项目
-            ↓
-        检查脚本
-            ↓
-        查找来源表
-            ↓
-        查找目标表
-            ↓
-        删除同一语句的旧字段血缘
-            ↓
-        创建或复用 DataColumn
-            ↓
-        创建 ColumnLineage
-            ↓
-        创建 LineageEvidence
+    1. 本函数会执行flush；
+    2. 本函数不会执行commit；
+    3. 最终事务由上层调用者控制。
     """
 
     if statement_no < 1:
@@ -332,18 +383,8 @@ def persist_direct_column_lineage(
     )
 
     # --------------------------------------------------------
-    # 第二步：查询来源表和目标表
+    # 第二步：查询目标表
     # --------------------------------------------------------
-
-    source_table = _get_table_or_raise(
-        db=db,
-        project_id=project_id,
-        full_name=(
-            extraction_result
-            .source_table_full_name
-        ),
-        table_role="来源表",
-    )
 
     target_table = _get_table_or_raise(
         db=db,
@@ -356,7 +397,61 @@ def persist_direct_column_lineage(
     )
 
     # --------------------------------------------------------
-    # 第三步：删除当前语句原来的血缘
+    # 第三步：查询所有实际来源表
+    # --------------------------------------------------------
+
+    source_table_names = (
+        _get_mapping_source_table_names(
+            extraction_result
+        )
+    )
+
+    if not source_table_names:
+        raise ValueError(
+            "字段血缘没有可用的来源表"
+        )
+
+    source_tables_by_name: dict[
+        str,
+        DataTable,
+    ] = {}
+
+    for source_table_name in (
+        source_table_names
+    ):
+        source_table = (
+            _get_table_or_raise(
+                db=db,
+                project_id=project_id,
+                full_name=source_table_name,
+                table_role="来源表",
+            )
+        )
+
+        source_tables_by_name[
+            source_table_name
+        ] = source_table
+
+    # 按提取结果中的来源表顺序生成ID。
+    source_table_ids = tuple(
+        source_tables_by_name[
+            table_name
+        ].id
+        for table_name in source_table_names
+    )
+
+    # 单来源表继续返回原来的source_table_id。
+    #
+    # 多来源表时返回None，
+    # 防止调用者误以为只有一个来源表。
+    source_table_id = (
+        source_table_ids[0]
+        if len(source_table_ids) == 1
+        else None
+    )
+
+    # --------------------------------------------------------
+    # 第四步：删除当前语句以前的血缘
     # --------------------------------------------------------
 
     deleted_lineage_count = (
@@ -369,7 +464,7 @@ def persist_direct_column_lineage(
     )
 
     # --------------------------------------------------------
-    # 第四步：创建字段、血缘和证据
+    # 第五步：创建字段、血缘和证据
     # --------------------------------------------------------
 
     created_column_count = 0
@@ -384,12 +479,43 @@ def persist_direct_column_lineage(
         extraction_result.mappings
     ):
         # ----------------------------------------------------
+        # 检查Mapping目标表是否一致
+        # ----------------------------------------------------
+
+        if (
+            mapping.target_table_full_name
+            != target_table.full_name
+        ):
+            raise ValueError(
+                "Mapping目标表与提取结果目标表不一致："
+                f"mapping={mapping.target_table_full_name}, "
+                f"result={target_table.full_name}"
+            )
+
+        # ----------------------------------------------------
+        # 根据每条Mapping选择真实来源表
+        # ----------------------------------------------------
+
+        source_table = (
+            source_tables_by_name.get(
+                mapping
+                .source_table_full_name
+            )
+        )
+
+        if source_table is None:
+            raise ValueError(
+                "Mapping引用了未加载的来源表："
+                f"{mapping.source_table_full_name}"
+            )
+
+        # ----------------------------------------------------
         # 创建或复用来源字段
         # ----------------------------------------------------
         #
-        # 当前只能从 SQL 中知道来源字段名称，
-        # 不能可靠地知道来源表中字段的实际顺序，
-        # 因此来源字段 ordinal_position 暂时使用 None。
+        # SQL只能可靠给出来源字段名称，
+        # 不能确定来源物理表中的真实字段顺序，
+        # 所以ordinal_position暂时为None。
         # ----------------------------------------------------
 
         (
@@ -411,14 +537,6 @@ def persist_direct_column_lineage(
 
         # ----------------------------------------------------
         # 创建或复用目标字段
-        # ----------------------------------------------------
-        #
-        # 目标字段顺序来自：
-        #
-        # INSERT INTO target (
-        #     第1个字段,
-        #     第2个字段
-        # )
         # ----------------------------------------------------
 
         (
@@ -447,8 +565,12 @@ def persist_direct_column_lineage(
         lineage = ColumnLineage(
             project_id=project_id,
             script_id=script_id,
-            target_column_id=target_column.id,
-            source_column_id=source_column.id,
+            target_column_id=(
+                target_column.id
+            ),
+            source_column_id=(
+                source_column.id
+            ),
             relation_type=(
                 mapping.relation_type
             ),
@@ -462,30 +584,20 @@ def persist_direct_column_lineage(
         db.add(lineage)
         db.flush()
 
-        created_lineage_count += 1
-
         lineage_ids.append(
             lineage.id
         )
 
+        created_lineage_count += 1
+
         # ----------------------------------------------------
-        # 创建代码证据
-        # ----------------------------------------------------
-        #
-        # 当前阶段还没有精确计算源码行号，
-        # 所以 line_start 和 line_end 暂时为 None。
-        #
-        # code_snippet 保存 SELECT 投影表达式，例如：
-        #
-        #     order_id
-        #
-        # 或：
-        #
-        #     source_order_id AS order_id
+        # 创建血缘代码证据
         # ----------------------------------------------------
 
         evidence = LineageEvidence(
-            column_lineage_id=lineage.id,
+            column_lineage_id=(
+                lineage.id
+            ),
             script_id=script_id,
             statement_no=statement_no,
             evidence_order=1,
@@ -506,15 +618,22 @@ def persist_direct_column_lineage(
     db.flush()
 
     # --------------------------------------------------------
-    # 第五步：返回持久化统计
+    # 第六步：返回持久化统计
     # --------------------------------------------------------
 
     return ColumnLineagePersistenceResult(
         project_id=project_id,
         script_id=script_id,
         statement_no=statement_no,
-        source_table_id=source_table.id,
-        target_table_id=target_table.id,
+        source_table_id=(
+            source_table_id
+        ),
+        source_table_ids=(
+            source_table_ids
+        ),
+        target_table_id=(
+            target_table.id
+        ),
         created_column_count=(
             created_column_count
         ),
@@ -530,5 +649,7 @@ def persist_direct_column_lineage(
         created_evidence_count=(
             created_evidence_count
         ),
-        lineage_ids=tuple(lineage_ids),
+        lineage_ids=tuple(
+            lineage_ids
+        ),
     )

@@ -562,3 +562,330 @@ def test_reject_invalid_statement_number(
                 extraction_result
             ),
         )
+
+# ============================================================
+# 7. 保存多来源转换字段血缘
+# ============================================================
+
+def test_persist_transform_lineage(
+    db_session,
+):
+    unique_suffix = uuid4().hex[:8]
+
+    project = LineageProject(
+        name=(
+            "transform_lineage_"
+            f"{unique_suffix}"
+        )
+    )
+
+    db_session.add(project)
+    db_session.flush()
+
+    sql_text = """
+    INSERT INTO dwd.orders (
+        amount
+    )
+    SELECT
+        price * quantity AS amount
+    FROM ods.orders;
+    """
+
+    script = SourceScript(
+        project_id=project.id,
+        file_name="calculate_amount.sql",
+        relative_path=(
+            f"tests/{unique_suffix}/"
+            "calculate_amount.sql"
+        ),
+        dialect="hive",
+        file_hash="8" * 64,
+        source_code=sql_text,
+        parse_status="success",
+    )
+
+    source_table = DataTable(
+        project_id=project.id,
+        schema_name="ods",
+        table_name="orders",
+        full_name="ods.orders",
+        table_kind="physical",
+    )
+
+    target_table = DataTable(
+        project_id=project.id,
+        schema_name="dwd",
+        table_name="orders",
+        full_name="dwd.orders",
+        table_kind="physical",
+    )
+
+    db_session.add_all(
+        [
+            script,
+            source_table,
+            target_table,
+        ]
+    )
+
+    db_session.flush()
+
+    extraction_result = (
+        extract_direct_column_lineage(
+            sql_text=sql_text,
+            dialect="hive",
+        )
+    )
+
+    result = persist_direct_column_lineage(
+        db=db_session,
+        project_id=project.id,
+        script_id=script.id,
+        statement_no=1,
+        extraction_result=(
+            extraction_result
+        ),
+    )
+
+    assert result.created_column_count == 3
+    assert result.reused_column_count == 1
+
+    assert result.created_lineage_count == 2
+    assert result.created_evidence_count == 2
+
+    lineages = list(
+        db_session.scalars(
+            select(ColumnLineage)
+            .where(
+                ColumnLineage.script_id
+                == script.id
+            )
+        ).all()
+    )
+
+    assert len(lineages) == 2
+
+    source_names = {
+        lineage.source_column.column_name
+        for lineage in lineages
+    }
+
+    assert source_names == {
+        "price",
+        "quantity",
+    }
+
+    target_ids = {
+        lineage.target_column_id
+        for lineage in lineages
+    }
+
+    # 两个来源字段必须指向同一个目标字段。
+    assert len(target_ids) == 1
+
+    assert all(
+        lineage.relation_type
+        == "transform"
+        for lineage in lineages
+    )
+
+    assert all(
+        lineage.expression_text
+        == "price * quantity AS amount"
+        for lineage in lineages
+    )
+
+# ============================================================
+# 8. 保存JOIN多来源表字段血缘
+# ============================================================
+
+def test_persist_join_column_lineage(
+    db_session,
+):
+    unique_suffix = uuid4().hex[:8]
+
+    project = LineageProject(
+        name=(
+            "join_persistence_"
+            f"{unique_suffix}"
+        )
+    )
+
+    db_session.add(project)
+    db_session.flush()
+
+    sql_text = """
+    INSERT INTO dwd.order_detail (
+        order_id,
+        customer_name
+    )
+    SELECT
+        o.order_id,
+        c.customer_name
+    FROM ods.orders AS o
+    JOIN ods.customer AS c
+        ON o.customer_id = c.customer_id;
+    """
+
+    script = SourceScript(
+        project_id=project.id,
+        file_name="join_order_customer.sql",
+        relative_path=(
+            f"tests/{unique_suffix}/"
+            "join_order_customer.sql"
+        ),
+        dialect="hive",
+        file_hash="7" * 64,
+        source_code=sql_text,
+        parse_status="success",
+    )
+
+    orders_table = DataTable(
+        project_id=project.id,
+        schema_name="ods",
+        table_name="orders",
+        full_name="ods.orders",
+        table_kind="physical",
+    )
+
+    customer_table = DataTable(
+        project_id=project.id,
+        schema_name="ods",
+        table_name="customer",
+        full_name="ods.customer",
+        table_kind="physical",
+    )
+
+    target_table = DataTable(
+        project_id=project.id,
+        schema_name="dwd",
+        table_name="order_detail",
+        full_name="dwd.order_detail",
+        table_kind="physical",
+    )
+
+    db_session.add_all(
+        [
+            script,
+            orders_table,
+            customer_table,
+            target_table,
+        ]
+    )
+
+    db_session.flush()
+
+    extraction_result = (
+        extract_direct_column_lineage(
+            sql_text=sql_text,
+            dialect="hive",
+        )
+    )
+
+    result = persist_direct_column_lineage(
+        db=db_session,
+        project_id=project.id,
+        script_id=script.id,
+        statement_no=1,
+        extraction_result=(
+            extraction_result
+        ),
+    )
+
+    # 两个来源表，所以单数ID必须为None。
+    assert result.source_table_id is None
+
+    assert set(
+        result.source_table_ids
+    ) == {
+        orders_table.id,
+        customer_table.id,
+    }
+
+    assert (
+        result.target_table_id
+        == target_table.id
+    )
+
+    # 来源字段：
+    #
+    # ods.orders.order_id
+    # ods.customer.customer_name
+    #
+    # 目标字段：
+    #
+    # dwd.order_detail.order_id
+    # dwd.order_detail.customer_name
+    assert result.created_column_count == 4
+    assert result.reused_column_count == 0
+
+    assert result.created_lineage_count == 2
+    assert result.created_evidence_count == 2
+
+    lineages = list(
+        db_session.scalars(
+            select(ColumnLineage)
+            .where(
+                ColumnLineage.script_id
+                == script.id
+            )
+        ).all()
+    )
+
+    assert len(lineages) == 2
+
+    actual_mappings = {
+        (
+            lineage
+            .source_column
+            .table
+            .full_name,
+
+            lineage
+            .source_column
+            .column_name,
+
+            lineage
+            .target_column
+            .table
+            .full_name,
+
+            lineage
+            .target_column
+            .column_name,
+        )
+        for lineage in lineages
+    }
+
+    assert actual_mappings == {
+        (
+            "ods.orders",
+            "order_id",
+            "dwd.order_detail",
+            "order_id",
+        ),
+        (
+            "ods.customer",
+            "customer_name",
+            "dwd.order_detail",
+            "customer_name",
+        ),
+    }
+
+    assert all(
+        lineage.relation_type
+        == "direct"
+        for lineage in lineages
+    )
+
+    evidences = list(
+        db_session.scalars(
+            select(LineageEvidence)
+            .where(
+                LineageEvidence.script_id
+                == script.id
+            )
+        ).all()
+    )
+
+    assert len(evidences) == 2
