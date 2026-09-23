@@ -301,7 +301,10 @@ def process_script_column_lineage(
 
         if not isinstance(
             expression,
-            exp.Insert,
+            (
+                exp.Insert,
+                exp.Create,
+            ),
         ):
             skipped_statement_count += 1
 
